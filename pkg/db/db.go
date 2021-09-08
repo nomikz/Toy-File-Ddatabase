@@ -10,31 +10,75 @@ import (
 
 var (
 	ErrFileNotFound = errors.New("error file not found")
-	ErrDeserializingData = errors.New("error deserializing data")
+	ErrDataBase     = errors.New("error database error")
 )
 
 type DataStore struct {
 	fileLocation string
-	mx *sync.Mutex
+	mx           *sync.Mutex
 }
 
-func (ds *DataStore) Counter(now time.Time) (int, error){
+func New(fileLocation string) (*DataStore, error) {
+	if _, err := ioutil.ReadFile(fileLocation); err != nil {
+
+		// if there is not file, create
+		jsonBytes, err := json.Marshal([]string{})
+		if err != nil {
+			return nil, ErrDataBase
+		}
+		if err = ioutil.WriteFile(fileLocation, jsonBytes, 0644); err != nil {
+			return nil, ErrDataBase
+		}
+	}
+
+	datastore := DataStore{
+		fileLocation: fileLocation,
+		mx:           &sync.Mutex{},
+	}
+
+	return &datastore, nil
+}
+
+func (ds *DataStore) Counter(secs int) (int, error) {
+	// set lock
 	ds.mx.Lock()
 	defer ds.mx.Unlock()
 
-	bs, err := ioutil.ReadFile(ds.fileLocation)
+	// read file
+	bytes, err := ioutil.ReadFile(ds.fileLocation)
 	if err != nil {
 		return 0, ErrFileNotFound
 	}
 
-	var arr []string
-
-	err = json.Unmarshal(bs, &arr)
+	// deserialize to slice of times
+	var times []time.Time
+	err = json.Unmarshal(bytes, &times)
 	if err != nil {
-		0, ErrDeserializingData
+		return 0, ErrDataBase
 	}
 
-	for _, timeStr := range arr {
-		time timeStr
+	// filter old times because they are no longer relevant. Storing will cause latency for reads
+	var filteredTimes []time.Time
+	for _, t := range times {
+		checkPoint := time.Now().Add(time.Second * time.Duration(-secs))
+		if t.After(checkPoint) {
+			filteredTimes = append(filteredTimes, t)
+		}
 	}
+
+	// add the time of the current request
+	filteredTimes = append(filteredTimes, time.Now())
+	bytes, err = json.Marshal(filteredTimes)
+	if err != nil {
+		return 0, ErrDataBase
+	}
+
+	// overwrite the file
+	err = ioutil.WriteFile(ds.fileLocation, bytes, 0644)
+	if err != nil {
+		return 0, ErrDataBase
+	}
+
+	// return the count of requests for the last period
+	return len(filteredTimes), nil
 }
